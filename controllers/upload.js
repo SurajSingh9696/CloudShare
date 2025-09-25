@@ -45,7 +45,7 @@ const uploadFile = async (req, res) => {
           mimeType: type?.mime || mimeType,
           fileData: buffer, // Store the actual file data
           size: buffer.length,
-          uploadDate: new Date(),
+          createdAt: new Date(),
           expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours
         };
 
