@@ -1,12 +1,20 @@
-const busboy = require("busboy"); // v1+ syntax
-const cloudinary = require("../config/cloudinary");
-const models = require("../models/model");
+const busboy = require("busboy");
+const { MongoClient, ObjectId } = require('mongodb');
 const { nanoid } = require("nanoid");
 const { fileTypeFromBuffer } = require("file-type");
-const streamifier = require("streamifier");
+
+// MongoDB connection
+const uri = process.env.MONGODB_URI;
+const client = new MongoClient(uri);
+const dbName = "Small_Projects";
 
 const uploadFile = async (req, res) => {
+  let connection;
   try {
+    await client.connect();
+    connection = client.db(dbName);
+    const filesCollection = connection.collection("CloudShare");
+
     const bb = busboy({ headers: req.headers });
     let fileProcessed = false;
 
@@ -25,62 +33,30 @@ const uploadFile = async (req, res) => {
         const extension = type?.ext || filename.split(".").pop() || "bin";
         const finalFilename = filename || `file.${extension}`;
 
-        // Determine Cloudinary resource type
-        let resourceType = "raw";
-        if (type?.mime?.startsWith("image/")) resourceType = "image";
-        else if (type?.mime?.startsWith("video/")) resourceType = "video";
-
         // Generate unique ID
         const fileUuid = nanoid(6);
-        const publicId = `${fileUuid}.${extension}`;
 
         fileProcessed = true;
 
-        // Upload buffer to Cloudinary
-        const uploadStream = cloudinary.uploader.upload_stream(
-          { resource_type: resourceType, public_id: publicId },
-          async (error, result) => {
-            if (error) {
-              console.error("Cloudinary Upload Error:", error);
-              return res.status(500).json({
-                success: false,
-                message: "Cloudinary Upload Failed",
-                error: error.message,
-              });
-            }
+        // Save file to MongoDB
+        const fileDocument = {
+          filename: finalFilename,
+          id: fileUuid,
+          mimeType: type?.mime || mimeType,
+          fileData: buffer, // Store the actual file data
+          size: buffer.length,
+          uploadDate: new Date(),
+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours
+        };
 
-            try {
-              // Transform URL for forced download
-              const rawUrl = result.secure_url;
-              const parts = rawUrl.split("/upload/");
-              const transformedUrl =
-                parts[0] + "/upload/fl_attachment/" + parts[1];
+        const result = await filesCollection.insertOne(fileDocument);
 
-              // Save metadata to DB
-              await models.create({
-                filename: finalFilename,
-                id: fileUuid,
-                url: transformedUrl,
-              });
+        return res.status(200).json({
+          success: true,
+          id: fileUuid,
+          message: "File uploaded successfully"
+        });
 
-              return res.status(200).json({
-                success: true,
-                id: fileUuid,
-                url: transformedUrl,
-              });
-            } catch (dbError) {
-              console.error("DB Save Error:", dbError);
-              return res.status(500).json({
-                success: false,
-                message: "Database save failed",
-                error: dbError.message,
-              });
-            }
-          }
-        );
-
-        // Pipe buffer into Cloudinary upload stream
-        streamifier.createReadStream(buffer).pipe(uploadStream);
       } catch (innerErr) {
         console.error("Upload processing error:", innerErr);
         return res.status(500).json({
@@ -100,7 +76,17 @@ const uploadFile = async (req, res) => {
       console.log("Busboy finished parsing.");
     });
 
+    bb.on("error", (error) => {
+      console.error("Busboy error:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Error parsing form data",
+        error: error.message,
+      });
+    });
+
     req.pipe(bb);
+
   } catch (error) {
     console.error("Server error:", error);
     res.status(500).json({
@@ -108,6 +94,9 @@ const uploadFile = async (req, res) => {
       message: "Server Error",
       error: error.message,
     });
+  } finally {
+    // Don't close the connection immediately to allow for multiple requests
+    // The connection will be managed by connection pooling
   }
 };
 
